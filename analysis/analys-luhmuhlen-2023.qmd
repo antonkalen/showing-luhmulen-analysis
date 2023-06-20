@@ -2,7 +2,7 @@
 format:
   html:
     page-layout: full
-    
+    self-contained: true
 execute:
   echo: false
 ---
@@ -12,6 +12,8 @@ execute:
 library(readr)
 library(here)
 library(dplyr)
+library(stringr)
+
 
 race_data_r <- read_csv(here("data/race_data.csv"))
 
@@ -28,9 +30,21 @@ race_data_r <- race_data_r |>
   ) |> 
   ungroup()
 
+
+
 jumps <- race_data_r |> 
-  distinct(category) |> 
-  filter(!is.na(category)) |> 
+  count(category) |> 
+  filter(n == n_distinct(race_data_r$horse)) |> 
+  mutate(
+    nr = as.integer(str_extract(category, "[:digit:]*")),
+    nr = case_when(
+      category == "Start" ~ 0,
+      category == "Mål" ~ max(nr, na.rm = TRUE) + 1,
+      TRUE ~ nr
+    ),
+    letter = stringr::str_extract(category, "[:alpha:]"),
+  ) |> 
+  arrange(nr, letter) |> 
   pull(category)
 
 ojs_define(jumps)
