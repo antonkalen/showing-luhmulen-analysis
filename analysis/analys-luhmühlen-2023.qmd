@@ -1,0 +1,584 @@
+---
+format:
+  html:
+    page-layout: full
+    
+execute:
+  echo: false
+---
+
+```{r}
+#| include: false
+library(readr)
+library(here)
+library(dplyr)
+
+race_data_r <- read_csv(here("data/race_data.csv"))
+
+race_data_r <- race_data_r |> 
+  group_by(rider, horse) |> 
+  group_modify(~add_row(.x, gait = "canter", time = 0, speed = 0, distance = 0)) |> 
+  arrange(time, .by_group = TRUE) |> 
+  mutate(
+    category = case_when(
+      time == min(time) ~ "Start",
+      time == max(time) ~ "Mål",
+      TRUE ~ jump_id
+    )
+  ) |> 
+  ungroup()
+
+jumps <- race_data_r |> 
+  distinct(category) |> 
+  filter(!is.na(category)) |> 
+  pull(category)
+
+ojs_define(jumps)
+ojs_define(race_data_r)
+```
+
+```{ojs}
+import { aq, op } from '@uwdata/arquero'
+```
+
+
+```{ojs}
+raceDataAq = aq.from(transpose(race_data_r))
+```
+
+
+```{ojs}
+JumpTime = raceDataAq
+  .params({jump: centerJump})
+  .filter((d, $) => d.category == $.jump)
+  .select('horse', 'time')
+  .rename({time: 'jumpTime'})
+```
+
+```{ojs}
+plotData = raceDataAq
+  .join_left(JumpTime)
+  .derive({time: d => d.time - d.jumpTime})
+```
+
+
+```{ojs}
+Plot.plot({
+  width: width,
+  x: {domain: xRange},
+  color: { legend: true },
+  marks: [
+    Plot.ruleY([0]),
+    Plot.line(plotData, {
+      x: "time",
+      y: "speed",
+      curve: "catmull-rom",
+      title: (d) =>
+        `${d.horse} \n ${d.speed} m/min \n ${d.time} sec`,
+      marker: marksOn,
+      stroke: "horse"
+    }),
+    Plot.dot(
+      plotData.filter(d => d.jump_id != undefined), {
+        x: "time",
+        y: "speed",
+        stroke: "horse",
+        fill: "white",
+        symbol: "square",
+        r: 10
+      }
+    ),
+    Plot.text(plotData.filter(d => d.jump_id != "NA"), {
+      x: "time",
+      y: "speed",
+      text: "jump_id",
+      fill: "black"
+    })
+  ]
+})
+```
+
+
+```{ojs}
+
+viewof xRange = interval(
+  [d3.min(plotData, d => d.time), d3.max(plotData, d => d.time)], 
+  {
+    step: 1,
+    value: [d3.min(plotData, d => d.time), d3.max(plotData, d => d.time)],
+    width: width * 0.95
+  })
+```
+
+
+```{ojs}
+viewof marksOn = Inputs.toggle({label: "Visa steg", value: false})
+```
+
+```{ojs}
+viewof centerJump = Inputs.select(jumps, {label: "Centrera på", value: "Start"})
+```
+
+```{ojs}
+// from import {interval} from '@mootari/range-slider'
+
+function interval(range = [], options = {}) {
+  const [min = 0, max = 1] = range;
+  const {
+    step = .001,
+    label = null,
+    value = [min, max],
+    format = ([start, end]) => `${start} … ${end}`,
+    color,
+    width,
+    theme,
+  } = options;
+
+  const __ns__ = DOM.uid('scope').id;
+  const css = `
+#${__ns__} {
+  font: 13px/1.2 var(--sans-serif);
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  max-width: 100%;
+  width: auto;
+}
+@media only screen and (min-width: 30em) {
+  #${__ns__} {
+    flex-wrap: nowrap;
+    width: 360px;
+  }
+}
+#${__ns__} .label {
+  width: 120px;
+  padding: 5px 0 4px 0;
+  margin-right: 6.5px;
+  flex-shrink: 0;
+}
+#${__ns__} .form {
+  display: flex;
+  width: 100%;
+}
+#${__ns__} .range {
+  flex-shrink: 1;
+  width: 100%;
+}
+#${__ns__} .range-slider {
+  width: 100%;
+}
+  `;
+  
+  const $range = rangeInput({min, max, value: [value[0], value[1]], step, color, width, theme});
+  const $output = html`<output>`;
+  const $view = html`<div id=${__ns__}>
+${label == null ? '' : html`<div class="label">${label}`}
+<div class=form>
+  <div class=range>
+    ${$range}<div class=range-output>${$output}</div>
+  </div>
+</div>
+${html`<style>${css}`}
+  `;
+
+  const update = () => {
+    const content = format([$range.value[0], $range.value[1]]);
+    if(typeof content === 'string') $output.value = content;
+    else {
+      while($output.lastChild) $output.lastChild.remove();
+      $output.appendChild(content);
+    }
+  };
+  $range.oninput = update;
+  update();
+  
+  return Object.defineProperty($view, 'value', {
+    get: () => $range.value,
+    set: ([a, b]) => {
+      $range.value = [a, b];
+      update();
+    },
+  });
+}
+
+function rangeInput(options = {}) {
+  const {
+    min = 0,
+    max = 100,
+    step = 'any',
+    value: defaultValue = [min, max],
+    color,
+    width,
+    theme = theme_Flat,
+  } = options;
+  
+  const controls = {};
+  const scope = randomScope();
+  const clamp = (a, b, v) => v < a ? a : v > b ? b : v;
+  const html = htl.html;
+
+  // Will be used to sanitize values while avoiding floating point issues.
+  const input = html`<input type=range ${{min, max, step}}>`;
+  
+  const dom = html`<div class=${`${scope} range-slider`} style=${{
+    color,
+    width: cssLength(width),
+  }}>
+  ${controls.track = html`<div class="range-track">
+    ${controls.zone = html`<div class="range-track-zone">
+      ${controls.range = html`<div class="range-select" tabindex=0>
+        ${controls.min = html`<div class="thumb thumb-min" tabindex=0>`}
+        ${controls.max = html`<div class="thumb thumb-max" tabindex=0>`}
+      `}
+    `}
+  `}
+  ${html`<style>${theme.replace(/:scope\b/g, '.'+scope)}`}
+</div>`;
+
+  let value = [], changed = false;
+  Object.defineProperty(dom, 'value', {
+    get: () => [...value],
+    set: ([a, b]) => {
+      value = sanitize(a, b);
+      updateRange();
+    },
+  });
+
+  const sanitize = (a, b) => {
+    a = isNaN(a) ? min : ((input.value = a), input.valueAsNumber);
+    b = isNaN(b) ? max : ((input.value = b), input.valueAsNumber);
+    return [Math.min(a, b), Math.max(a, b)];
+  }
+  
+  const updateRange = () => {
+    const ratio = v => (v - min) / (max - min);
+    dom.style.setProperty('--range-min', `${ratio(value[0]) * 100}%`);
+    dom.style.setProperty('--range-max', `${ratio(value[1]) * 100}%`);
+  };
+
+  const dispatch = name => {
+    dom.dispatchEvent(new Event(name, {bubbles: true}));
+  };
+  const setValue = (vmin, vmax) => {
+    const [pmin, pmax] = value;
+    value = sanitize(vmin, vmax);
+    updateRange();
+    // Only dispatch if values have changed.
+    if(pmin === value[0] && pmax === value[1]) return;
+    dispatch('input');
+    changed = true;
+  };
+  
+  setValue(...defaultValue);
+  
+  // Mousemove handlers.
+  const handlers = new Map([
+    [controls.min, (dt, ov) => {
+      const v = clamp(min, ov[1], ov[0] + dt * (max - min));
+      setValue(v, ov[1]);
+    }],
+    [controls.max, (dt, ov) => {
+      const v = clamp(ov[0], max, ov[1] + dt * (max - min));
+      setValue(ov[0], v);
+    }],
+    [controls.range, (dt, ov) => {
+      const d = ov[1] - ov[0];
+      const v = clamp(min, max - d, ov[0] + dt * (max - min));
+      setValue(v, v + d);
+    }],
+  ]);
+  
+  // Returns client offset object.
+  const pointer = e => e.touches ? e.touches[0] : e;
+  // Note: Chrome defaults "passive" for touch events to true.
+  const on  = (e, fn) => e.split(' ').map(e => document.addEventListener(e, fn, {passive: false}));
+  const off = (e, fn) => e.split(' ').map(e => document.removeEventListener(e, fn, {passive: false}));
+  
+  let initialX, initialV, target, dragging = false;
+  function handleDrag(e) {
+    // Gracefully handle exit and reentry of the viewport.
+    if(!e.buttons && !e.touches) {
+      handleDragStop();
+      return;
+    }
+    dragging = true;
+    const w = controls.zone.getBoundingClientRect().width;
+    e.preventDefault();
+    handlers.get(target)((pointer(e).clientX - initialX) / w, initialV);
+  }
+  
+  
+  function handleDragStop(e) {
+    off('mousemove touchmove', handleDrag);
+    off('mouseup touchend', handleDragStop);
+    if(changed) dispatch('change');
+  }
+  
+  invalidation.then(handleDragStop);
+  
+  dom.ontouchstart = dom.onmousedown = e => {
+    dragging = false;
+    changed = false;
+    if(!handlers.has(e.target)) return;
+    on('mousemove touchmove', handleDrag);
+    on('mouseup touchend', handleDragStop);
+    e.preventDefault();
+    e.stopPropagation();
+    
+    target = e.target;
+    initialX = pointer(e).clientX;
+    initialV = value.slice();
+  };
+  
+  controls.track.onclick = e => {
+    if(dragging) return;
+    changed = false;
+    const r = controls.zone.getBoundingClientRect();
+    const t = clamp(0, 1, (pointer(e).clientX - r.left) / r.width);
+    const v = min + t * (max - min);
+    const [vmin, vmax] = value, d = vmax - vmin;
+    if(v < vmin) setValue(v, v + d);
+    else if(v > vmax) setValue(v - d, v);
+    if(changed) dispatch('change');
+  };
+  
+  return dom;
+}
+
+function randomScope(prefix = 'scope-') {
+  return prefix + (performance.now() + Math.random()).toString(32).replace('.', '-');
+}
+
+html = htl.html
+
+cssLength = v => v == null ? null : typeof v === 'number' ? `${v}px` : `${v}`
+
+theme_Flat = `
+/* Options */
+:scope {
+  color: #3b99fc;
+  width: 240px;
+}
+
+:scope {
+  position: relative;
+  display: inline-block;
+  --thumb-size: 15px;
+  --thumb-radius: calc(var(--thumb-size) / 2);
+  padding: var(--thumb-radius) 0;
+  margin: 2px;
+  vertical-align: middle;
+}
+:scope .range-track {
+  box-sizing: border-box;
+  position: relative;
+  height: 7px;
+  background-color: hsl(0, 0%, 80%);
+  overflow: visible;
+  border-radius: 4px;
+  padding: 0 var(--thumb-radius);
+}
+:scope .range-track-zone {
+  box-sizing: border-box;
+  position: relative;
+}
+:scope .range-select {
+  box-sizing: border-box;
+  position: relative;
+  left: var(--range-min);
+  width: calc(var(--range-max) - var(--range-min));
+  cursor: ew-resize;
+  background: currentColor;
+  height: 7px;
+  border: inherit;
+}
+/* Expands the hotspot area. */
+:scope .range-select:before {
+  content: "";
+  position: absolute;
+  width: 100%;
+  height: var(--thumb-size);
+  left: 0;
+  top: calc(2px - var(--thumb-radius));
+}
+:scope .range-select:focus,
+:scope .thumb:focus {
+  outline: none;
+}
+:scope .thumb {
+  box-sizing: border-box;
+  position: absolute;
+  width: var(--thumb-size);
+  height: var(--thumb-size);
+
+  background: #fcfcfc;
+  top: -4px;
+  border-radius: 100%;
+  border: 1px solid hsl(0,0%,55%);
+  cursor: default;
+  margin: 0;
+}
+:scope .thumb:active {
+  box-shadow: inset 0 var(--thumb-size) #0002;
+}
+:scope .thumb-min {
+  left: calc(-1px - var(--thumb-radius));
+}
+:scope .thumb-max {
+  right: calc(-1px - var(--thumb-radius));
+}
+`
+```
+
+```{ojs}
+// from import {Plot} from "@mkfreeman/plot-tooltip"
+
+addTooltips = (chart, styles) => {
+  const stroke_styles = { stroke: "blue", "stroke-width": 3 };
+  const fill_styles = { fill: "blue", opacity: 0.5 };
+
+  // Workaround if it's in a figure
+  const type = d3.select(chart).node().tagName;
+  let wrapper =
+    type === "FIGURE" ? d3.select(chart).select("svg") : d3.select(chart);
+
+  // Workaround if there's a legend....
+  const svgs = d3.select(chart).selectAll("svg");
+  if (svgs.size() > 1) wrapper = d3.select([...svgs].pop());
+  wrapper.style("overflow", "visible"); // to avoid clipping at the edges
+
+  // Set pointer events to visibleStroke if the fill is none (e.g., if its a line)
+  wrapper.selectAll("path").each(function (data, index, nodes) {
+    // For line charts, set the pointer events to be visible stroke
+    if (
+      d3.select(this).attr("fill") === null ||
+      d3.select(this).attr("fill") === "none"
+    ) {
+      d3.select(this).style("pointer-events", "visibleStroke");
+      if (styles === undefined) styles = stroke_styles;
+    }
+  });
+  
+  if (styles === undefined) styles = fill_styles;
+
+  const tip = wrapper
+    .selectAll(".hover")
+    .data([1])
+    .join("g")
+    .attr("class", "hover")
+    .style("pointer-events", "none")
+    .style("text-anchor", "middle");
+
+  // Add a unique id to the chart for styling
+  const id = id_generator();
+
+  // Add the event listeners
+  d3.select(chart).classed(id, true); // using a class selector so that it doesn't overwrite the ID
+  wrapper.selectAll("title").each(function () {
+    // Get the text out of the title, set it as an attribute on the parent, and remove it
+    const title = d3.select(this); // title element that we want to remove
+    const parent = d3.select(this.parentNode); // visual mark on the screen
+    const t = title.text();
+    if (t) {
+      parent.attr("__title", t).classed("has-title", true);
+      title.remove();
+    }
+    // Mouse events
+    parent
+      .on("pointerenter pointermove", function (event) {
+        const text = d3.select(this).attr("__title");
+        const pointer = d3.pointer(event, wrapper.node());
+        if (text) tip.call(hover, pointer, text.split("\n"));
+        else tip.selectAll("*").remove();
+
+        // Raise it
+        d3.select(this).raise();
+        // Keep within the parent horizontally
+        const tipSize = tip.node().getBBox();
+        if (pointer[0] + tipSize.x < 0)
+          tip.attr(
+            "transform",
+            `translate(${tipSize.width / 2}, ${pointer[1] + 7})`
+          );
+        else if (pointer[0] + tipSize.width / 2 > wrapper.attr("width"))
+          tip.attr(
+            "transform",
+            `translate(${wrapper.attr("width") - tipSize.width / 2}, ${
+              pointer[1] + 7
+            })`
+          );
+      })
+      .on("pointerout", function (event) {
+        tip.selectAll("*").remove();
+        // Lower it!
+        d3.select(this).lower();
+      });
+  });
+
+  // Remove the tip if you tap on the wrapper (for mobile)
+  wrapper.on("touchstart", () => tip.selectAll("*").remove());
+
+  // Define the styles
+  chart.appendChild(html`<style>
+  .${id} .has-title { cursor: pointer;  pointer-events: all; }
+  .${id} .has-title:hover { ${Object.entries(styles).map(([key, value]) => `${key}: ${value};`).join(" ")} }`);
+
+  return chart;
+}
+
+// Function to position the tooltip
+hover = (tip, pos, text) => {
+  const side_padding = 10;
+  const vertical_padding = 5;
+  const vertical_offset = 15;
+
+  // Empty it out
+  tip.selectAll("*").remove();
+
+  // Append the text
+  tip
+    .style("text-anchor", "middle")
+    .style("pointer-events", "none")
+    .attr("transform", `translate(${pos[0]}, ${pos[1] + 7})`)
+    .selectAll("text")
+    .data(text)
+    .join("text")
+    .style("dominant-baseline", "ideographic")
+    .text((d) => d)
+    .attr("y", (d, i) => (i - (text.length - 1)) * 15 - vertical_offset)
+    .style("font-weight", (d, i) => (i === 0 ? "bold" : "normal"));
+
+  const bbox = tip.node().getBBox();
+
+  // Add a rectangle (as background)
+  tip
+    .append("rect")
+    .attr("y", bbox.y - vertical_padding)
+    .attr("x", bbox.x - side_padding)
+    .attr("width", bbox.width + side_padding * 2)
+    .attr("height", bbox.height + vertical_padding * 2)
+    .style("fill", "white")
+    .style("stroke", "#d3d3d3")
+    .lower();
+}
+
+// To generate a unique ID for each chart so that they styles only apply to that chart
+id_generator = () => {
+  var S4 = function () {
+    return (((1 + Math.random()) * 0x10000) | 0).toString(16).substring(1);
+  };
+  return "a" + S4() + S4();
+}
+
+// automatically add tooltips to every Plot in a notebook
+// this allows users to do import { Plot } from "@mkfreeman/plot-tooltip
+Plot = tooltipPlugin(await require("@observablehq/plot"))
+
+tooltipPlugin = (Plot) => {
+  const { plot } = Plot;
+  Plot.plot = ({ tooltip, ...options }) => addTooltips(plot(options), tooltip);
+  return Plot;
+}
+
+```
+
